@@ -34,6 +34,12 @@ fn block(ops: Vec<Op>, at_start: bool) -> (Vec<Op>, bool) {
 }
 
 fn recognize(body: Vec<Op>, is_static: bool, items: &mut Vec<Item>) -> bool {
+    if let [Op::Move(step)] = body.as_slice() {
+        if matches!(step, 1 | -1) {
+            items.push((Op::Scan { off: 0, step: *step as i8 }, false));
+            return false;
+        }
+    }
     if let Some(replacement) = as_mul_loop(&body) {
         items.extend(replacement.into_iter().map(|op| {
             let carry = matches!(op, Op::If { .. });
@@ -149,6 +155,11 @@ fn normalize(items: Vec<Item>) -> Vec<Op> {
                 flush(&mut pending, &mut out, Some(off));
                 out.push(Op::If { off, body });
             }
+            Op::Scan { step, .. } => {
+                flush(&mut pending, &mut out, None);
+                out.push(Op::Scan { off, step });
+                off = 0;
+            }
         }
     }
     flush(&mut pending, &mut out, Some(0));
@@ -220,7 +231,7 @@ impl Folder {
                     Op::MulAdd { dst, .. } => {
                         summary.written.insert(*dst);
                     }
-                    Op::Move(_) => summary.unbalanced = true,
+                    Op::Move(_) | Op::Scan { .. } => summary.unbalanced = true,
                     Op::Out { .. } | Op::Write(_) => {}
                 }
             }
@@ -305,6 +316,18 @@ impl Folder {
                         }
                     }
                 }
+                Op::Scan { off, step: _ } => {
+                    let key = base + off;
+                    if self.state.get(key) == Some(0) {
+                        if *off != 0 {
+                            self.state.shift(*off);
+                            out.push(Op::Move(*off));
+                        }
+                        continue;
+                    }
+                    self.state.forget_all();
+                    out.push(op.clone());
+                }
                 Op::Loop { off, body } => {
                     let key = base + off;
                     if self.state.get(key) == Some(0) {
@@ -338,7 +361,7 @@ impl Folder {
 fn shift_offsets(ops: &mut [Op], delta: i32) {
     for op in ops {
         match op {
-            Op::Add { off, .. } | Op::Set { off, .. } | Op::In { off } | Op::Out { off } => *off += delta,
+            Op::Add { off, .. } | Op::Set { off, .. } | Op::In { off } | Op::Out { off } | Op::Scan { off, .. } => *off += delta,
             Op::MulAdd { src, dst, .. } => {
                 *src += delta;
                 *dst += delta;
@@ -378,10 +401,14 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(optimize(parse(b",[>]").unwrap())[1], Op::Loop { off: 0, body: vec![Op::Move(1)] });
+        assert_eq!(optimize(parse(b",[>]").unwrap())[1], Op::Scan { off: 0, step: 1 });
         let moves = |src: &[u8]| optimize(parse(src).unwrap()).iter().filter(|op| matches!(op, Op::Move(_))).count();
         assert_eq!(moves(b",>,[-<+>]<[>.<-]"), 0);
-        assert_eq!(moves(b",>>,[>].<<<"), 2);
+        assert_eq!(moves(b",>>,[>].<<<"), 1);
+        assert_eq!(optimize(parse(b">>[<]").unwrap()), vec![Op::Move(2)]);
+        assert_eq!(optimize(parse(b">>+[<]").unwrap()), vec![Op::Add { off: 2, val: 1 }, Op::Scan { off: 2, step: -1 }]);
+        assert_eq!(optimize(parse(b"+[>>]").unwrap()).len(), 2);
+        assert!(matches!(optimize(parse(b"+[>>]").unwrap())[1], Op::Loop { .. }));
     }
 
     #[test]

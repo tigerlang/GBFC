@@ -12,6 +12,8 @@ pub enum Op {
     Loop { off: i32, body: Vec<Op> },
     /// Like `Loop` but runs the body at most once; the body never moves the pointer.
     If { off: i32, body: Vec<Op> },
+    /// `Move(off)` followed by `while p != 0 { p += step }`; `step` is 1 or -1.
+    Scan { off: i32, step: i8 },
     Write(Vec<u8>),
 }
 
@@ -42,6 +44,7 @@ fn dump_into(ops: &[Op], depth: usize, text: &mut String) {
             Op::Move(n) => writeln!(text, "{pad}move  {n:+}"),
             Op::In { off } => writeln!(text, "{pad}in    [{off:+}]"),
             Op::Out { off } => writeln!(text, "{pad}out   [{off:+}]"),
+            Op::Scan { off, step } => writeln!(text, "{pad}scan  [{off:+}] step {step:+}"),
             Op::Write(bytes) => {
                 let preview: String = bytes
                     .iter()

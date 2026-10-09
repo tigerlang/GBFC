@@ -214,6 +214,24 @@ impl<'a> Asm<'a> {
         self.u32(rel as i32 as u32);
     }
 
+    fn jmp8_back(&mut self, target: usize) {
+        let rel = target as i64 - (self.buf.len() as i64 + 2);
+        self.bytes(&[0xEB, rel as i8 as u8]);
+    }
+
+    fn lea(&mut self, dst: u8, disp: i32) {
+        self.byte(0x48 | (dst >> 3));
+        self.byte(0x8D);
+        self.mem(dst, disp);
+    }
+
+    fn lea_idx(&mut self, dst: u8) {
+        self.byte(0x48 | (dst >> 3));
+        self.byte(0x8D);
+        self.byte((dst << 3) | 4);
+        self.byte(0x07);
+    }
+
     fn call_to(&mut self, fixups: fn(&mut Self) -> &mut Vec<usize>) {
         self.byte(0xE8);
         let at = self.buf.len();
@@ -475,7 +493,7 @@ impl<'a> Asm<'a> {
         let mut result = true;
         for op in body {
             result = match op {
-                Op::Move(_) => false,
+                Op::Move(_) | Op::Scan { .. } => false,
                 Op::Loop { body: inner, .. } | Op::If { body: inner, .. } => self.is_static(inner),
                 _ => true,
             };
@@ -544,6 +562,7 @@ impl<'a> Asm<'a> {
                 self.u32(bytes.len() as u32);
                 self.call_to(|s| &mut s.to_write_all);
             }
+            Op::Scan { off, step } => self.scan(base + off, step == -1),
             Op::If { off, ref body } => {
                 let at = base + off;
                 let body_len = self.ops_len(body, at);
@@ -688,6 +707,46 @@ impl<'a> Asm<'a> {
     fn jcc_fwd_unconditional(&mut self) -> Fwd {
         self.bytes(&[0xEB, 0]);
         Fwd { at: self.buf.len() - 1, short: true }
+    }
+
+    fn scan(&mut self, at: i32, back: bool) {
+        self.check(at, false);
+        if self.cfg.bounds {
+            let top = self.buf.len();
+            self.cmp0(at);
+            let done = self.jcc_fwd(CC_E, true);
+            self.add_ptr(if back { -1 } else { 1 });
+            self.check(at, true);
+            self.jmp_back(top);
+            self.patch(done);
+            self.add_ptr(at);
+            return;
+        }
+        self.lea(7, at);
+        self.bytes(&[0x66, 0x0F, 0xEF, 0xC9]);
+        let head = self.buf.len();
+        self.bytes(&[0x80, 0x3F, 0x00]);
+        let done = self.jcc_fwd(CC_E, true);
+        self.bytes(if back { &[0x48, 0xFF, 0xCF] } else { &[0x48, 0xFF, 0xC7] });
+        self.bytes(if back { &[0x40, 0x80, 0xFF, 0x0F] } else { &[0x40, 0xF6, 0xC7, 0x0F] });
+        self.jcc_back(CC_NE, head, true);
+        let block = self.buf.len();
+        self.bytes(if back { &[0xF3, 0x0F, 0x6F, 0x47, 0xF1] } else { &[0xF3, 0x0F, 0x6F, 0x07] });
+        self.bytes(&[0x66, 0x0F, 0x74, 0xC1]);
+        self.bytes(&[0x66, 0x0F, 0xD7, 0xC0]);
+        self.bytes(&[0x85, 0xC0]);
+        let hit = self.jcc_fwd(CC_NE, true);
+        self.bytes(if back { &[0x48, 0x83, 0xEF, 0x10] } else { &[0x48, 0x83, 0xC7, 0x10] });
+        self.jmp8_back(block);
+        self.patch(hit);
+        self.bytes(if back { &[0x0F, 0xBD, 0xC0] } else { &[0x0F, 0xBC, 0xC0] });
+        if back {
+            self.bytes(&[0x48, 0x83, 0xEF, 0x0F]);
+        }
+        self.bytes(&[0xEB, 2]);
+        self.patch(done);
+        self.bytes(&[0x31, 0xC0]);
+        self.lea_idx(3);
     }
 }
 
