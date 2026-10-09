@@ -178,6 +178,43 @@ fn short_and_near_jumps() {
 }
 
 #[test]
+fn scan_loops() {
+    let mut n = 0;
+    for len in [1usize, 2, 15, 16, 17, 33] {
+        let forward = format!("{}[>].", "+>".repeat(len) + &"<".repeat(len));
+        let backward = format!("{}[<].", ">+".repeat(len));
+        for (name, code) in [("forward", forward), ("backward", backward)] {
+            let src = tmp(&format!("scan-{name}{len}.b"));
+            std::fs::write(&src, &code).unwrap();
+            for mode in MODES {
+                let [jit, aot] = both(&src, mode, b"", &format!("scan-{name}{len}"));
+                assert_eq!(jit.stdout, vec![0u8], "{name} {len} jit {mode:?}");
+                assert_eq!(aot.stdout, vec![0u8], "{name} {len} aot {mode:?}");
+            }
+            let _ = std::fs::remove_file(&src);
+            n += 1;
+        }
+    }
+    let cases: &[(&str, &[u8])] = &[
+        ("+>>+[<]+.", &[1]),
+        ("+>+>+<<[>]+.>>+++[<]+.", &[1, 1]),
+        ("+>+>+<<[>]+[->+<]>.", &[1]),
+    ];
+    for (i, (code, want)) in cases.iter().enumerate() {
+        let src = tmp(&format!("scan{i}.b"));
+        std::fs::write(&src, code).unwrap();
+        for mode in MODES {
+            let [jit, aot] = both(&src, mode, b"", &format!("scan{i}"));
+            assert_eq!(jit.stdout, *want, "{code} jit {mode:?}");
+            assert_eq!(aot.stdout, *want, "{code} aot {mode:?}");
+        }
+        let _ = std::fs::remove_file(&src);
+        n += 1;
+    }
+    assert!(n > 10, "checked {n} scan programs");
+}
+
+#[test]
 fn bounds_check_traps() {
     let cases: &[(&str, &[&str], &[u8])] = &[
         ("<+", &[], b""),
@@ -186,6 +223,7 @@ fn bounds_check_traps() {
         (">>>>>", &["--tape-size", "4"], b""),
         ("+++++++[>++++++++<-]>.<<", &[], b"8"),
         ("+>+>+>+<<<[>]", &["--tape-size", "4"], b""),
+        ("+>+>+>+<<<[<]", &[], b""),
         ("+[>+]", &["--tape-size", "16"], b""),
     ];
     for (i, (code, extra, stdout)) in cases.iter().enumerate() {
