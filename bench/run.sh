@@ -36,7 +36,7 @@ PROGRAMS=(
 )
 
 HDR="| program | "; SEP="|---|"
-[ -n "$BASELINE" ] && { HDR+="v0.1.0 | "; SEP+="---:|"; }
+[ -n "$BASELINE" ] && { HDR+="v0.2.0 | "; SEP+="---:|"; }
 HDR+="-O0 | -O1 --fuel 0 | -O1 --fuel $FUEL | compile | output |"; SEP+="---:|---:|---:|---:|:---:|"
 echo "$HDR"; echo "$SEP"
 

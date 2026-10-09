@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-GBFC 0.1.0 - General BrainFuck Compiler (direct machine code, AOT + JIT)
+GBFC 0.2.0 - General BrainFuck Compiler (direct machine code, AOT + JIT)
 
 USAGE:
     gbfc [OPTIONS] <input.b>
@@ -80,7 +80,7 @@ fn parse_args(args: Vec<String>) -> Result<Option<Cli>> {
                 return Ok(None);
             }
             "-V" | "--version" => {
-                println!("gbfc 0.1.0");
+                println!("gbfc 0.2.0");
                 return Ok(None);
             }
             "-o" => cli.output = Some(value("-o")?),

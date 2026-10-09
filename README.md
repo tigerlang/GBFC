@@ -54,12 +54,12 @@ At `-O1` the compiler runs the program on a zeroed tape before generating code, 
 
 | Module | Role |
 |---|---|
-| `ir.rs` | IR: `Add/Set/MulAdd/Move/In/Out/Write/Loop/If`; every cell operation carries an offset from the data pointer; `Write` is constant output produced by compile-time evaluation |
-| `opt.rs` | run-length folding, pointer moves deferred across loops and `if`s, constant propagation with dead code removal, `[-]` to `set`, copy/multiply loops to `muladd` |
+| `ir.rs` | IR: `Add/Set/MulAdd/Move/In/Out/Write/Loop/If/Scan`; every cell operation carries an offset from the data pointer; `Write` is constant output produced by compile-time evaluation; `Scan` is a unit-stride search for a zero cell (`[>]`, `[<]`) |
+| `opt.rs` | run-length folding, pointer moves deferred across loops and `if`s, constant propagation with dead code removal, `[-]` to `set`, copy/multiply loops to `muladd`, scan loops to `scan` |
 | `peval.rs` | compile-time evaluation of the program prefix |
 | `target.rs` | `Arch` and `Os`, system call numbers (`Syscalls`) |
 | `backend/mod.rs` | `CodeGen` trait, `CodegenOptions`, `EntryKind::{Function, Process}` |
-| `backend/x86_64.rs` | hand-encoded x86-64; `rbx` holds the data pointer, I/O goes through raw syscalls; loop conditions reuse arithmetic flags, multiply groups share one source load |
+| `backend/x86_64.rs` | hand-encoded x86-64; `rbx` holds the data pointer, I/O goes through raw syscalls; loop conditions reuse arithmetic flags, multiply groups share one source load, `scan` searches 16 bytes at a time with SSE2 |
 | `format/` | executable writers per OS (currently `elf.rs`) |
 | `jit.rs` | loads and calls `extern "C" fn(*mut u8, usize) -> u32` |
 
