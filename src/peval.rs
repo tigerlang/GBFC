@@ -138,6 +138,22 @@ impl Ev {
                         }
                     }
                 }
+                Op::Scan { off, step } => {
+                    self.p += *off as i64;
+                    while *self.cell(base)? != 0 {
+                        if self.fuel == 0 {
+                            let mut rest = vec![Op::Scan { off: 0, step: *step }];
+                            rest.extend_from_slice(&ops[i + 1..]);
+                            return Err(self.halt(&rest));
+                        }
+                        self.fuel -= 1;
+                        self.p += *step as i64;
+                        let logical = self.p + base;
+                        if logical < 0 || logical as usize >= self.tape.len() {
+                            return Err(Stop::Abort);
+                        }
+                    }
+                }
             }
         }
         Ok(())

@@ -66,6 +66,15 @@ impl State<'_> {
                         return false;
                     }
                 }
+                Op::Scan { off, step } => {
+                    self.p = self.at(*off) as i64;
+                    while self.tape[self.at(base)] != 0 {
+                        if !self.tick() {
+                            return false;
+                        }
+                        self.p = self.at(*step as i32) as i64;
+                    }
+                }
             }
         }
         true
