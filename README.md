@@ -1,6 +1,6 @@
 # GBFC — General BrainFuck Compiler
 
-A Brainfuck (`.b`) compiler written in Rust. It generates machine code directly: no LLVM, no assembler, no external crates. It is not an interpreter.
+A compiler for Brainfuck (`.b`) and Brainfuck++ written in Rust. It generates machine code directly: no LLVM, no assembler, no external crates. It is not an interpreter.
 
 * **AOT**: self-contained static ELF executable (`hello` is about 1 KB), no libc and no linker.
 * **JIT**: the same machine code runs inside the compiler process (anonymous mapping, RW then RX, never W+X).
@@ -14,12 +14,14 @@ cargo build --release          # produces target/release/gbfc
 gbfc prog.b                    # AOT: ./prog (ELF)
 gbfc prog.b -o out             # AOT with an explicit output name
 gbfc -j prog.b                 # JIT: compile and run immediately
+gbfc -bfpp prog.b              # same, reading the source as Brainfuck++
 gbfc --emit ir  prog.b         # print the optimized IR
 gbfc --emit bin prog.b         # raw machine code (objdump -D -b binary -mi386:x86-64)
 ```
 
 | Option | Meaning |
 |---|---|
+| `-bf` / `-bfpp` / `-bf++` | source language, Brainfuck or Brainfuck++ (default `-bf`) |
 | `-O0` / `-O1` | optimizer off / on (default `-O1`) |
 | `--tape-size N` | tape size in cells (default 1048576) |
 | `--eof zero\|unchanged\|minus1` | result of `,` at EOF (default `zero`) |
@@ -33,6 +35,21 @@ gbfc --emit bin prog.b         # raw machine code (objdump -D -b binary -mi386:x
 Cells are 8-bit and wrap modulo 256. Every byte other than `+-<>[].,` is a comment. Unbalanced brackets are reported as `line:column`. Tape bounds are not checked unless `--bounds-check` is given; leaving the tape then ends in SIGSEGV.
 
 The executable exits with 0 on success, 1 when a bounds check fails and 2 on an I/O error (a failed write, or a read error other than EOF), and prints a message to stderr in both failure cases. Interrupted system calls are retried and partial writes are completed.
+
+## Languages
+
+`-bf` selects Brainfuck. `-bfpp` (or `-bf++`) selects Brainfuck++, which adds file and socket commands; the Brainfuck commands behave exactly the same, and in Brainfuck mode the extra characters are comments.
+
+| Command | Meaning |
+|---|---|
+| `#` | no file open: the cell holds the distance to a 0-terminated path, that file is opened read/write (created when missing) and the cell becomes 0x00 on success or 0xFF on failure. File already open: closes it |
+| `:` | reads one byte from the file into the current cell, 0x00 at EOF |
+| `;` | writes the current cell to the file |
+| `%` | no connection open: the cell holds the distance to a 0-terminated dotted IPv4 address followed by a two-byte big-endian port; a TCP connection is opened and the cell becomes 0x00 on success or 0xFF on failure. Connection open: closes it |
+| `^` | writes the current cell to the connection |
+| `!` | reads one byte from the connection into the current cell, 0x00 when the peer closed it |
+
+At most one file and one connection are open at a time, reads start at the beginning of a freshly opened file, and file and socket errors set the exit status to 2 like any other I/O error.
 
 ## Compile-time evaluation
 
@@ -54,12 +71,13 @@ At `-O1` the compiler runs the program on a zeroed tape before generating code, 
 
 | Module | Role |
 |---|---|
-| `ir.rs` | IR: `Add/Set/MulAdd/Move/In/Out/Write/Loop/If/Scan`; every cell operation carries an offset from the data pointer; `Write` is constant output produced by compile-time evaluation; `Scan` is a unit-stride search for a zero cell (`[>]`, `[<]`) |
+| `ir.rs` | IR: `Add/Set/MulAdd/Move/In/Out/Write/Loop/If/Scan` plus the Brainfuck++ `FOpen/FClose/FIn/FOut/NetOpen/NetClose/NetIn/NetOut`; every cell operation carries an offset from the data pointer; `Write` is constant output produced by compile-time evaluation; `Scan` is a unit-stride search for a zero cell (`[>]`, `[<]`) |
+| `parser.rs` | byte-level parse into IR; `Lang::{Bf, Bfpp}` selects the command set |
 | `opt.rs` | run-length folding, pointer moves deferred across loops and `if`s, constant propagation with dead code removal, `[-]` to `set`, copy/multiply loops to `muladd`, scan loops to `scan` |
 | `peval.rs` | compile-time evaluation of the program prefix |
 | `target.rs` | `Arch` and `Os`, system call numbers (`Syscalls`) |
 | `backend/mod.rs` | `CodeGen` trait, `CodegenOptions`, `EntryKind::{Function, Process}` |
-| `backend/x86_64.rs` | hand-encoded x86-64; `rbx` holds the data pointer, I/O goes through raw syscalls; loop conditions reuse arithmetic flags, multiply groups share one source load, `scan` searches 16 bytes at a time with SSE2 |
+| `backend/x86_64.rs` | hand-encoded x86-64; `rbx` holds the data pointer, I/O goes through raw syscalls; loop conditions reuse arithmetic flags, multiply groups share one source load, `scan` searches 16 bytes at a time with SSE2, file and socket commands keep their descriptor in the stack frame |
 | `format/` | executable writers per OS (currently `elf.rs`) |
 | `jit.rs` | loads and calls `extern "C" fn(*mut u8, usize) -> u32` |
 
@@ -72,3 +90,4 @@ cargo test --release
 ```
 
 * every `examples/*.b` runs through AOT and JIT in each optimization mode (`.in` is stdin, `.out` is the expected stdout);
+* Brainfuck++ file and socket commands are exercised over a real file and a TCP loopback connection;
