@@ -215,6 +215,95 @@ fn scan_loops() {
 }
 
 #[test]
+fn brainfuck_pp_files() {
+    let name = tmp("bfpp-file.b");
+    let path = tmp("bfpp-file.t");
+    let _ = std::fs::remove_file(&path);
+    let mut src = push_bytes(path.to_str().unwrap().as_bytes(), 5);
+    src.push('#');
+    src += &"+".repeat(b'A' as usize);
+    src.push(';');
+    src.push('#');
+    src.push_str("[-]+++++#:.");
+    std::fs::write(&name, src).unwrap();
+    for mode in [&["-bfpp"][..], &["-bf++", "-O0"][..], &["-bfpp", "--bounds-check"][..]] {
+        let [jit, aot] = both(&name, mode, b"", "bfpp-file");
+        assert_eq!(jit.stdout, vec![b'A'], "jit {mode:?}");
+        assert_eq!(aot.stdout, vec![b'A'], "aot {mode:?}");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), b"A");
+    let _ = std::fs::remove_file(&name);
+    let _ = std::fs::remove_file(&path);
+}
+
+fn push_bytes(bytes: &[u8], distance: u32) -> String {
+    let mut src = format!("{}{}", "+".repeat(distance as usize), ">".repeat(distance as usize));
+    for &b in bytes {
+        src += &"+".repeat(b as usize);
+        src.push('>');
+    }
+    src += &"<".repeat(distance as usize + bytes.len());
+    src
+}
+
+#[test]
+fn brainfuck_pp_open_failure() {
+    let name = tmp("bfpp-missing.b");
+    let path = tmp("no/such/dir/file.t");
+    std::fs::write(&name, format!("{}#.", push_bytes(path.to_str().unwrap().as_bytes(), 5))).unwrap();
+    let [jit, aot] = both(&name, &["-bfpp"], b"", "bfpp-missing");
+    assert_eq!(jit.stdout, vec![0xFF]);
+    assert_eq!(aot.stdout, vec![0xFF]);
+    let _ = std::fs::remove_file(&name);
+}
+
+#[test]
+fn brainfuck_pp_commands_are_comments_in_brainfuck() {
+    let name = tmp("bf-comments.b");
+    std::fs::write(&name, "++++++++[>++++++++<-]>#:;%^!.").unwrap();
+    let [jit, aot] = both(&name, &["-bf", "-O0"], b"", "bf-comments");
+    assert_eq!(jit.stdout, vec![64u8]);
+    assert_eq!(aot.stdout, vec![64u8]);
+    let _ = std::fs::remove_file(&name);
+}
+
+#[test]
+fn brainfuck_pp_socket() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let acceptor = listener.try_clone().unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut conn, _) = acceptor.accept().unwrap();
+            let mut buf = [0u8; 1];
+            conn.read_exact(&mut buf).unwrap();
+            conn.write_all(&[buf[0] + 1]).unwrap();
+        }
+    });
+
+    let mut src = push_bytes(b"127.0.0.1", 5);
+    src += &">".repeat(14);
+    src.push('>');
+    src += &"+".repeat((port >> 8) as usize);
+    src.push('>');
+    src += &"+".repeat((port & 0xFF) as usize);
+    src.push('>');
+    src += &"<".repeat(17);
+    src.push('%');
+    src.push('.');
+    src += &"+".repeat(b'A' as usize);
+    src.push_str("^!.");
+    let name = tmp("bfpp-net.b");
+    std::fs::write(&name, src).unwrap();
+    let [jit, aot] = both(&name, &["-bfpp", "--fuel", "0"], b"", "bfpp-net");
+    assert_eq!(jit.stdout, vec![0x00, b'A' + 1], "jit");
+    assert_eq!(aot.stdout, vec![0x00, b'A' + 1], "aot");
+    server.join().unwrap();
+    let _ = std::fs::remove_file(&name);
+}
+
+#[test]
 fn bounds_check_traps() {
     let cases: &[(&str, &[&str], &[u8])] = &[
         ("<+", &[], b""),
