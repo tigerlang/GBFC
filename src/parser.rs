@@ -1,7 +1,13 @@
 use crate::error::{err, Result};
 use crate::ir::Op;
 
-pub fn parse(src: &[u8]) -> Result<Vec<Op>> {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lang {
+    Bf,
+    Bfpp,
+}
+
+pub fn parse(src: &[u8], lang: Lang) -> Result<Vec<Op>> {
     let mut stack: Vec<(Vec<Op>, usize, usize)> = Vec::new();
     let mut cur: Vec<Op> = Vec::new();
     let (mut line, mut col) = (1usize, 0usize);
@@ -13,6 +19,7 @@ pub fn parse(src: &[u8]) -> Result<Vec<Op>> {
             continue;
         }
         col += 1;
+        let bfpp = lang == Lang::Bfpp;
         match c {
             b'+' => add(&mut cur, 1),
             b'-' => add(&mut cur, 255),
@@ -20,6 +27,12 @@ pub fn parse(src: &[u8]) -> Result<Vec<Op>> {
             b'<' => mv(&mut cur, -1),
             b'.' => cur.push(Op::Out { off: 0 }),
             b',' => cur.push(Op::In { off: 0 }),
+            b'#' if bfpp => cur.push(Op::FOpen { off: 0 }),
+            b':' if bfpp => cur.push(Op::FIn { off: 0 }),
+            b';' if bfpp => cur.push(Op::FOut { off: 0 }),
+            b'%' if bfpp => cur.push(Op::NetOpen { off: 0 }),
+            b'^' if bfpp => cur.push(Op::NetOut { off: 0 }),
+            b'!' if bfpp => cur.push(Op::NetIn { off: 0 }),
             b'[' => {
                 let parent = std::mem::take(&mut cur);
                 stack.push((parent, line, col));

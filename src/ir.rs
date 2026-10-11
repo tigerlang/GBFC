@@ -14,6 +14,21 @@ pub enum Op {
     If { off: i32, body: Vec<Op> },
     /// `Move(off)` followed by `while p != 0 { p += step }`; `step` is 1 or -1.
     Scan { off: i32, step: i8 },
+    /// Opens a file named at `p + off + tape[p+off]` (0-terminated); the cell at
+    /// `p+off` becomes 0x00 on success and 0xFF on failure. Closes when one is open.
+    FOpen { off: i32 },
+    /// Closes the open file.
+    FClose,
+    /// Reads one byte from the open file into `p+off`; 0x00 at EOF.
+    FIn { off: i32 },
+    /// Writes `tape[p+off]` to the open file.
+    FOut { off: i32 },
+    /// Like `FOpen`, but the name is a dotted IPv4 address followed by a
+    /// two-byte big-endian port.
+    NetOpen { off: i32 },
+    NetClose,
+    NetIn { off: i32 },
+    NetOut { off: i32 },
     Write(Vec<u8>),
 }
 
@@ -24,6 +39,32 @@ pub fn count(ops: &[Op]) -> usize {
             _ => 1,
         })
         .sum()
+}
+
+impl Op {
+    pub fn shifted(&self, delta: i32) -> Op {
+        let mut op = self.clone();
+        match &mut op {
+            Op::Add { off, .. }
+            | Op::Set { off, .. }
+            | Op::In { off }
+            | Op::Out { off }
+            | Op::Scan { off, .. }
+            | Op::FOpen { off }
+            | Op::FIn { off }
+            | Op::FOut { off }
+            | Op::NetOpen { off }
+            | Op::NetIn { off }
+            | Op::NetOut { off } => *off += delta,
+            Op::MulAdd { src, dst, .. } => {
+                *src += delta;
+                *dst += delta;
+            }
+            Op::Loop { off, .. } | Op::If { off, .. } => *off += delta,
+            Op::Move(_) | Op::FClose | Op::NetClose | Op::Write(_) => {}
+        }
+        op
+    }
 }
 
 pub fn dump(ops: &[Op]) -> String {
@@ -45,6 +86,14 @@ fn dump_into(ops: &[Op], depth: usize, text: &mut String) {
             Op::In { off } => writeln!(text, "{pad}in    [{off:+}]"),
             Op::Out { off } => writeln!(text, "{pad}out   [{off:+}]"),
             Op::Scan { off, step } => writeln!(text, "{pad}scan  [{off:+}] step {step:+}"),
+            Op::FOpen { off } => writeln!(text, "{pad}fopen [{off:+}]"),
+            Op::FClose => writeln!(text, "{pad}fclose"),
+            Op::FIn { off } => writeln!(text, "{pad}fin   [{off:+}]"),
+            Op::FOut { off } => writeln!(text, "{pad}fout  [{off:+}]"),
+            Op::NetOpen { off } => writeln!(text, "{pad}nopen [{off:+}]"),
+            Op::NetClose => writeln!(text, "{pad}nclose"),
+            Op::NetIn { off } => writeln!(text, "{pad}nin   [{off:+}]"),
+            Op::NetOut { off } => writeln!(text, "{pad}nout  [{off:+}]"),
             Op::Write(bytes) => {
                 let preview: String = bytes
                     .iter()

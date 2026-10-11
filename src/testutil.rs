@@ -1,4 +1,7 @@
 use crate::ir::Op;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, TcpStream};
 
 pub const N: i64 = 64;
 
@@ -10,11 +13,55 @@ struct State<'a> {
     out: Vec<u8>,
     steps: u64,
     limit: u64,
+    file: Option<std::fs::File>,
+    sock: Option<TcpStream>,
 }
 
 impl State<'_> {
     fn at(&self, off: i32) -> usize {
         (self.p + off as i64).rem_euclid(N) as usize
+    }
+
+    fn text(&self, from: i32) -> Vec<u8> {
+        let mut text = Vec::new();
+        let mut at = from;
+        while self.tape[self.at(at)] != 0 && text.len() < N as usize {
+            text.push(self.tape[self.at(at)]);
+            at += 1;
+        }
+        text
+    }
+
+    fn open_file(&mut self, off: i32) {
+        let start = off + self.tape[self.at(off)] as i32;
+        let path = String::from_utf8_lossy(&self.text(start)).to_string();
+        self.file = None;
+        self.tape[self.at(off)] = match OpenOptions::new().read(true).write(true).create(true).open(&path) {
+            Ok(f) => {
+                self.file = Some(f);
+                0
+            }
+            Err(_) => 0xFF,
+        };
+    }
+
+    fn open_socket(&mut self, off: i32) {
+        let start = off + self.tape[self.at(off)] as i32;
+        let host = self.text(start);
+        let port_at = start + host.len() as i32 + 1;
+        let port = u16::from(self.tape[self.at(port_at)]) << 8 | u16::from(self.tape[self.at(port_at + 1)]);
+        let octets: Vec<u8> = String::from_utf8_lossy(&host).split('.').filter_map(|x| x.parse().ok()).collect();
+        self.sock = None;
+        self.tape[self.at(off)] = match octets.as_slice() {
+            [a, b, c, d] => match TcpStream::connect((Ipv4Addr::new(*a, *b, *c, *d), port)) {
+                Ok(s) => {
+                    self.sock = Some(s);
+                    0
+                }
+                Err(_) => 0xFF,
+            },
+            _ => 0xFF,
+        };
     }
 
     fn tick(&mut self) -> bool {
@@ -75,6 +122,32 @@ impl State<'_> {
                         self.p = self.at(*step as i32) as i64;
                     }
                 }
+                Op::FOpen { off } => self.open_file(base + off),
+                Op::FClose => self.file = None,
+                Op::FIn { off } => {
+                    let cell = self.at(base + off);
+                    let mut byte = [0u8; 1];
+                    self.tape[cell] = self.file.as_mut().map_or(0, |f| if f.read_exact(&mut byte).is_ok() { byte[0] } else { 0 });
+                }
+                Op::FOut { off } => {
+                    let byte = [self.tape[self.at(base + off)]];
+                    if let Some(f) = &mut self.file {
+                        let _ = f.write_all(&byte);
+                    }
+                }
+                Op::NetOpen { off } => self.open_socket(base + off),
+                Op::NetClose => self.sock = None,
+                Op::NetIn { off } => {
+                    let cell = self.at(base + off);
+                    let mut byte = [0u8; 1];
+                    self.tape[cell] = self.sock.as_mut().map_or(0, |s| if s.read_exact(&mut byte).is_ok() { byte[0] } else { 0 });
+                }
+                Op::NetOut { off } => {
+                    let byte = [self.tape[self.at(base + off)]];
+                    if let Some(s) = &mut self.sock {
+                        let _ = s.write_all(&byte);
+                    }
+                }
             }
         }
         true
@@ -82,7 +155,17 @@ impl State<'_> {
 }
 
 pub fn run(ops: &[Op], input: &[u8], limit: u64) -> Option<Vec<u8>> {
-    let mut state = State { tape: [0; N as usize], p: 0, input, read: 0, out: vec![], steps: 0, limit };
+    let mut state = State {
+        tape: [0; N as usize],
+        p: 0,
+        input,
+        read: 0,
+        out: vec![],
+        steps: 0,
+        limit,
+        file: None,
+        sock: None,
+    };
     state.exec(ops, 0).then_some(state.out)
 }
 

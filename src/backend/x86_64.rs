@@ -13,11 +13,20 @@ pub struct X86_64;
 const BUF: u32 = 4096;
 const TRAP_MSG: &[u8] = b"gbfc: runtime error: tape pointer out of bounds\n";
 const IO_MSG: &[u8] = b"gbfc: runtime error: I/O error\n";
+const O_RDWR_CREAT: u32 = 0x42;
+const FILE_MODE: u32 = 0o666;
+const AF_INET: u32 = 2;
+const SOCK_STREAM: u32 = 1;
+const SOCKADDR_LEN: u32 = 16;
+const FF: u32 = 0;
+const SFD: u32 = 8;
 
 const CC_B: u8 = 0x2;
 const CC_AE: u8 = 0x3;
 const CC_E: u8 = 0x4;
 const CC_NE: u8 = 0x5;
+const CC_BE: u8 = 0x6;
+const CC_S: u8 = 0x8;
 const CC_LE: u8 = 0xE;
 const CC_G: u8 = 0xF;
 
@@ -28,6 +37,7 @@ struct Cfg {
     bounds: bool,
     out: bool,
     inp: bool,
+    ff: bool,
 }
 
 impl Cfg {
@@ -50,6 +60,19 @@ impl CodeGen for X86_64 {
             bounds: opts.bounds_check,
             out: uses(ops, &|op| matches!(op, Op::Out { .. } | Op::Write(_))),
             inp: uses(ops, &|op| matches!(op, Op::In { .. })),
+            ff: uses(ops, &|op| {
+                matches!(
+                    op,
+                    Op::FOpen { .. }
+                        | Op::FClose
+                        | Op::FIn { .. }
+                        | Op::FOut { .. }
+                        | Op::NetOpen { .. }
+                        | Op::NetClose
+                        | Op::NetIn { .. }
+                        | Op::NetOut { .. }
+                )
+            }),
         };
         let mut asm = Asm::new(cfg);
 
@@ -118,6 +141,7 @@ struct Asm<'a> {
     to_flush: Vec<usize>,
     to_put: Vec<usize>,
     to_write_all: Vec<usize>,
+    to_write_fd: Vec<usize>,
     to_refill: Vec<usize>,
     to_trap: Vec<usize>,
     to_data: Vec<(usize, usize)>,
@@ -134,6 +158,7 @@ impl<'a> Asm<'a> {
             to_flush: Vec::new(),
             to_put: Vec::new(),
             to_write_all: Vec::new(),
+            to_write_fd: Vec::new(),
             to_refill: Vec::new(),
             to_trap: Vec::new(),
             to_data: Vec::new(),
@@ -232,6 +257,218 @@ impl<'a> Asm<'a> {
         self.byte(0x07);
     }
 
+    fn lea_ptr(&mut self, dst: u8, disp: i32) {
+        self.byte(0x48 | (dst >> 3));
+        self.byte(0x8D);
+        if disp == 0 {
+            self.byte((dst << 3) | 4);
+            self.byte(0x03);
+        } else if let Ok(d) = i8::try_from(disp) {
+            self.byte((dst << 3) | 0x44);
+            self.byte(0x03);
+            self.byte(d as u8);
+        } else {
+            self.byte((dst << 3) | 0x84);
+            self.byte(0x03);
+            self.u32(disp as u32);
+        }
+    }
+
+    fn load_fd(&mut self, slot: u32) {
+        if slot == 0 {
+            self.bytes(&[0x48, 0x8B, 0x04, 0x24]);
+        } else {
+            self.bytes(&[0x48, 0x8B, 0x44, 0x24]);
+            self.byte(slot as u8);
+        }
+    }
+
+    fn store_fd(&mut self, slot: u32, reg: u8) {
+        self.byte(0x48 | (reg >> 3));
+        self.byte(0x89);
+        if slot == 0 {
+            self.byte(0x04 | (reg << 3));
+            self.byte(0x24);
+        } else {
+            self.byte(0x44 | (reg << 3));
+            self.byte(0x24);
+            self.byte(slot as u8);
+        }
+    }
+
+    fn store_fd_none(&mut self, slot: u32) {
+        if slot == 0 {
+            self.bytes(&[0x48, 0xC7, 0x04, 0x24]);
+        } else {
+            self.bytes(&[0x48, 0xC7, 0x44, 0x24]);
+            self.byte(slot as u8);
+        }
+        self.u32(u32::MAX);
+    }
+
+    fn close_fd(&mut self, slot: u32) {
+        self.load_fd(slot);
+        self.bytes(&[0x48, 0x85, 0xC0]);
+        let done = self.jcc_fwd(CC_S, false);
+        self.bytes(&[0x48, 0x89, 0xC7]);
+        self.byte(0xB8);
+        self.u32(self.cfg.sys.close);
+        self.bytes(&[0x0F, 0x05]);
+        self.store_fd_none(slot);
+        self.patch(done);
+    }
+
+    fn set_cell(&mut self, at: i32, val: u8) {
+        self.byte(0xC6);
+        self.mem(0, at);
+        self.byte(val);
+    }
+
+    fn fd_read(&mut self, at: i32, slot: u32) {
+        self.load_fd(slot);
+        self.bytes(&[0x48, 0x89, 0xC7]);
+        self.lea(6, at);
+        self.byte(0xBA);
+        self.u32(1);
+        let top = self.buf.len();
+        self.byte(0x31);
+        self.byte(0xC0);
+        self.bytes(&[0x0F, 0x05]);
+        self.cmp_rax_eintr();
+        self.jcc_back(CC_E, top, true);
+        self.bytes(&[0x48, 0x83, 0xF8, 0x01]);
+        let got = self.jcc_fwd(CC_E, false);
+        self.bytes(&[0x48, 0x85, 0xC0]);
+        let bad = self.jcc_fwd(CC_S, false);
+        self.set_cell(at, 0);
+        let done = self.jcc_fwd_unconditional();
+        self.patch(bad);
+        self.set_io_error();
+        self.patch(got);
+        self.patch(done);
+    }
+
+    fn fd_write(&mut self, at: i32, slot: u32) {
+        self.load_fd(slot);
+        self.bytes(&[0x48, 0x89, 0xC7]);
+        self.lea(6, at);
+        self.byte(0xBA);
+        self.u32(1);
+        self.call_to(|s| &mut s.to_write_fd);
+    }
+
+    fn file_open(&mut self, at: i32) {
+        self.close_fd(FF);
+        self.bytes(&[0x0F, 0xB6]);
+        self.mem(0, at);
+        self.lea_ptr(7, at);
+        self.bytes(&[0x48, 0x89, 0xFA]);
+        let find = self.buf.len();
+        self.bytes(&[0x80, 0x3A, 0x00]);
+        let found = self.jcc_fwd(CC_E, false);
+        self.bytes(&[0x48, 0xFF, 0xC2]);
+        self.jmp_back(find);
+        self.patch(found);
+        self.byte(0xBE);
+        self.u32(O_RDWR_CREAT);
+        self.byte(0xBA);
+        self.u32(FILE_MODE);
+        self.byte(0xB8);
+        self.u32(self.cfg.sys.open);
+        self.bytes(&[0x0F, 0x05]);
+        self.bytes(&[0x48, 0x85, 0xC0]);
+        let failed = self.jcc_fwd(CC_S, false);
+        self.store_fd(FF, 0);
+        self.set_cell(at, 0x00);
+        let done = self.jcc_fwd_unconditional();
+        self.patch(failed);
+        self.store_fd_none(FF);
+        self.set_cell(at, 0xFF);
+        self.patch(done);
+    }
+
+    fn net_open(&mut self, at: i32) {
+        self.close_fd(SFD);
+        self.bytes(&[0x0F, 0xB6]);
+        self.mem(0, at);
+        self.lea_ptr(2, at);
+        self.bytes(&[0x48, 0x89, 0xD6]);
+        let find = self.buf.len();
+        self.bytes(&[0x80, 0x3E, 0x00]);
+        let found = self.jcc_fwd(CC_E, false);
+        self.bytes(&[0x48, 0xFF, 0xC6]);
+        self.jmp_back(find);
+        self.patch(found);
+        self.bytes(&[0x31, 0xC0]);
+        self.bytes(&[0x31, 0xC9]);
+        let parse = self.buf.len();
+        self.bytes(&[0x48, 0x39, 0xD6]);
+        let digits = self.jcc_fwd(CC_BE, false);
+        self.bytes(&[0x44, 0x0F, 0xB6, 0x1A]);
+        self.bytes(&[0x48, 0xFF, 0xC2]);
+        self.bytes(&[0x41, 0x80, 0xFB, 0x2E]);
+        let dot = self.jcc_fwd(CC_NE, false);
+        self.bytes(&[0xC1, 0xE0, 0x08]);
+        self.bytes(&[0x09, 0xC8]);
+        self.bytes(&[0x31, 0xC9]);
+        let next = self.jcc_fwd_unconditional();
+        self.patch(dot);
+        self.bytes(&[0x6B, 0xC9, 0x0A]);
+        self.bytes(&[0x41, 0x83, 0xEB, 0x30]);
+        self.bytes(&[0x44, 0x01, 0xD9]);
+        self.patch(next);
+        self.jmp_back(parse);
+        self.patch(digits);
+        self.bytes(&[0xC1, 0xE0, 0x08]);
+        self.bytes(&[0x09, 0xC8]);
+        self.bytes(&[0x0F, 0xC8]);
+        self.bytes(&[0x44, 0x0F, 0xB7, 0x5E, 0x01]);
+        self.bytes(&[0x41, 0xC1, 0xE3, 0x10]);
+        self.bytes(&[0x41, 0x83, 0xCB, AF_INET as i8 as u8]);
+        self.bytes(&[0x6A, 0x00]);
+        self.byte(0x50);
+        self.bytes(&[0x41, 0x53]);
+        self.bytes(&[0x48, 0x89, 0xE6]);
+        self.byte(0xBA);
+        self.u32(SOCKADDR_LEN);
+        self.byte(0xB8);
+        self.u32(self.cfg.sys.socket);
+        self.byte(0xBF);
+        self.u32(AF_INET);
+        self.byte(0xBE);
+        self.u32(SOCK_STREAM);
+        self.bytes(&[0x31, 0xD2]);
+        self.bytes(&[0x0F, 0x05]);
+        self.bytes(&[0x48, 0x85, 0xC0]);
+        let broken = self.jcc_fwd(CC_S, false);
+        self.bytes(&[0x48, 0x89, 0xC7]);
+        self.bytes(&[0x48, 0x89, 0xE6]);
+        self.byte(0xBA);
+        self.u32(SOCKADDR_LEN);
+        self.byte(0xB8);
+        self.u32(self.cfg.sys.connect);
+        self.bytes(&[0x0F, 0x05]);
+        self.bytes(&[0x48, 0x83, 0xC4, 0x18]);
+        self.bytes(&[0x48, 0x85, 0xC0]);
+        let refused = self.jcc_fwd(CC_NE, false);
+        self.store_fd(SFD, 7);
+        self.set_cell(at, 0x00);
+        let done = self.jcc_fwd_unconditional();
+        self.patch(refused);
+        self.byte(0xB8);
+        self.u32(self.cfg.sys.close);
+        self.bytes(&[0x0F, 0x05]);
+        self.store_fd_none(SFD);
+        self.set_cell(at, 0xFF);
+        let end = self.jcc_fwd_unconditional();
+        self.patch(broken);
+        self.bytes(&[0x48, 0x83, 0xC4, 0x18]);
+        self.store_fd_none(SFD);
+        self.set_cell(at, 0xFF);
+        self.patch(end);
+        self.patch(done);
+    }
+
     fn call_to(&mut self, fixups: fn(&mut Self) -> &mut Vec<usize>) {
         self.byte(0xE8);
         let at = self.buf.len();
@@ -273,12 +510,24 @@ impl<'a> Asm<'a> {
             self.bytes(&[0x49, 0x89, 0xFF]);
             self.bytes(&[0x48, 0x89, 0xF5]);
         }
+        if self.cfg.ff {
+            self.bytes(&[0x48, 0x81, 0xEC]);
+            self.u32(16);
+            self.bytes(&[0x48, 0xC7, 0x04, 0x24]);
+            self.u32(u32::MAX);
+            self.bytes(&[0x48, 0xC7, 0x44, 0x24, 0x08]);
+            self.u32(u32::MAX);
+        }
     }
 
     fn epilogue(&mut self) -> usize {
         let end = self.buf.len();
         if self.cfg.out {
             self.call_to(|s| &mut s.to_flush);
+        }
+        if self.cfg.ff {
+            self.bytes(&[0x48, 0x81, 0xC4]);
+            self.u32(16);
         }
         if self.cfg.io() {
             self.bytes(&[0x48, 0x81, 0xC4]);
@@ -344,7 +593,7 @@ impl<'a> Asm<'a> {
     }
 
     fn finish(&mut self, trap: usize) {
-        let (mut flush, mut write_all, mut put, mut refill) = (0, 0, 0, 0);
+        let (mut flush, mut write_all, mut put, mut write_fd, mut refill) = (0, 0, 0, 0, 0);
         if self.cfg.out {
             write_all = self.buf.len();
             let top = self.buf.len();
@@ -380,6 +629,24 @@ impl<'a> Asm<'a> {
             self.bytes(&[0x4D, 0x39, 0xF5]);
             self.bytes(&[0x70 | CC_B, 5]);
             self.jmp_back(flush);
+            self.byte(0xC3);
+        }
+        if self.cfg.ff {
+            write_fd = self.buf.len();
+            let top = self.buf.len();
+            self.byte(0xB8);
+            self.u32(self.cfg.sys.write);
+            self.bytes(&[0x0F, 0x05]);
+            self.cmp_rax_eintr();
+            self.jcc_back(CC_E, top, true);
+            self.bytes(&[0x48, 0x85, 0xC0]);
+            let failed = self.jcc_fwd(CC_LE, true);
+            self.bytes(&[0x48, 0x01, 0xC6]);
+            self.bytes(&[0x48, 0x29, 0xC2]);
+            self.jcc_back(CC_NE, top, true);
+            self.byte(0xC3);
+            self.patch(failed);
+            self.set_io_error();
             self.byte(0xC3);
         }
         if self.cfg.inp {
@@ -423,6 +690,7 @@ impl<'a> Asm<'a> {
             (std::mem::take(&mut self.to_flush), flush),
             (std::mem::take(&mut self.to_put), put),
             (std::mem::take(&mut self.to_write_all), write_all),
+            (std::mem::take(&mut self.to_write_fd), write_fd),
             (std::mem::take(&mut self.to_refill), refill),
         ] {
             for at in fixups {
@@ -563,6 +831,14 @@ impl<'a> Asm<'a> {
                 self.call_to(|s| &mut s.to_write_all);
             }
             Op::Scan { off, step } => self.scan(base + off, step == -1),
+            Op::FOpen { off } => self.file_open(base + off),
+            Op::FClose => self.close_fd(FF),
+            Op::FIn { off } => self.fd_read(base + off, FF),
+            Op::FOut { off } => self.fd_write(base + off, FF),
+            Op::NetOpen { off } => self.net_open(base + off),
+            Op::NetClose => self.close_fd(SFD),
+            Op::NetIn { off } => self.fd_read(base + off, SFD),
+            Op::NetOut { off } => self.fd_write(base + off, SFD),
             Op::If { off, ref body } => {
                 let at = base + off;
                 let body_len = self.ops_len(body, at);

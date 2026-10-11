@@ -135,6 +135,19 @@ fn normalize(items: Vec<Item>) -> Vec<Op> {
                 flush(&mut pending, &mut out, None);
                 out.push(Op::In { off: o + off });
             }
+            Op::FOpen { .. }
+            | Op::FIn { .. }
+            | Op::FOut { .. }
+            | Op::NetOpen { .. }
+            | Op::NetIn { .. }
+            | Op::NetOut { .. } => {
+                flush(&mut pending, &mut out, None);
+                out.push(op.shifted(off));
+            }
+            Op::FClose | Op::NetClose => {
+                flush(&mut pending, &mut out, None);
+                out.push(op);
+            }
             Op::Out { off: o } => {
                 flush(&mut pending, &mut out, None);
                 out.push(Op::Out { off: o + off });
@@ -228,11 +241,14 @@ impl Folder {
                     Op::Add { off, .. } | Op::Set { off, .. } | Op::In { off } => {
                         summary.written.insert(*off);
                     }
+                    Op::FOpen { off } | Op::FIn { off } | Op::NetOpen { off } | Op::NetIn { off } => {
+                        summary.written.insert(*off);
+                    }
                     Op::MulAdd { dst, .. } => {
                         summary.written.insert(*dst);
                     }
                     Op::Move(_) | Op::Scan { .. } => summary.unbalanced = true,
-                    Op::Out { .. } | Op::Write(_) => {}
+                    Op::Out { .. } | Op::FOut { .. } | Op::NetOut { .. } | Op::FClose | Op::NetClose | Op::Write(_) => {}
                 }
             }
             summary.written = summary.written.iter().map(|key| key + off).collect();
@@ -283,6 +299,11 @@ impl Folder {
                     self.state.set(base + off, None);
                     out.push(op.clone());
                 }
+                Op::FOpen { off } | Op::FIn { off } | Op::NetOpen { off } | Op::NetIn { off } => {
+                    self.state.set(base + off, None);
+                    out.push(op.clone());
+                }
+                Op::FOut { .. } | Op::NetOut { .. } | Op::FClose | Op::NetClose => out.push(op.clone()),
                 Op::Out { .. } | Op::Write(_) => out.push(op.clone()),
                 Op::Move(n) => {
                     self.state.shift(*n);
@@ -359,29 +380,21 @@ impl Folder {
 }
 
 fn shift_offsets(ops: &mut [Op], delta: i32) {
-    for op in ops {
-        match op {
-            Op::Add { off, .. } | Op::Set { off, .. } | Op::In { off } | Op::Out { off } | Op::Scan { off, .. } => *off += delta,
-            Op::MulAdd { src, dst, .. } => {
-                *src += delta;
-                *dst += delta;
-            }
-            Op::Loop { off, .. } | Op::If { off, .. } => *off += delta,
-            Op::Move(_) | Op::Write(_) => {}
-        }
+    for op in ops.iter_mut() {
+        *op = op.shifted(delta);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parser::parse;
+    use crate::parser::{parse, Lang};
     use crate::testutil::{random_source, run, Lcg};
 
     #[test]
     fn hello_world() {
         let src = b"++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.";
-        let raw = parse(src).unwrap();
+        let raw = parse(src, Lang::Bf).unwrap();
         let optimized = optimize(raw.clone());
         assert_eq!(run(&optimized, b"", 1_000_000).unwrap(), b"Hello World!\n");
         assert_eq!(run(&raw, b"", 1_000_000).unwrap(), b"Hello World!\n");
@@ -389,10 +402,10 @@ mod tests {
 
     #[test]
     fn patterns() {
-        assert_eq!(optimize(parse(b"+++[-]").unwrap()), vec![]);
-        assert_eq!(optimize(parse(b"[->+<].").unwrap()).len(), 1);
+        assert_eq!(optimize(parse(b"+++[-]", Lang::Bf).unwrap()), vec![]);
+        assert_eq!(optimize(parse(b"[->+<].", Lang::Bf).unwrap()).len(), 1);
         assert_eq!(
-            optimize(parse(b",[->+<]").unwrap()),
+            optimize(parse(b",[->+<]", Lang::Bf).unwrap()),
             vec![
                 Op::In { off: 0 },
                 Op::If {
@@ -401,14 +414,14 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(optimize(parse(b",[>]").unwrap())[1], Op::Scan { off: 0, step: 1 });
-        let moves = |src: &[u8]| optimize(parse(src).unwrap()).iter().filter(|op| matches!(op, Op::Move(_))).count();
+        assert_eq!(optimize(parse(b",[>]", Lang::Bf).unwrap())[1], Op::Scan { off: 0, step: 1 });
+        let moves = |src: &[u8]| optimize(parse(src, Lang::Bf).unwrap()).iter().filter(|op| matches!(op, Op::Move(_))).count();
         assert_eq!(moves(b",>,[-<+>]<[>.<-]"), 0);
         assert_eq!(moves(b",>>,[>].<<<"), 1);
-        assert_eq!(optimize(parse(b">>[<]").unwrap()), vec![Op::Move(2)]);
-        assert_eq!(optimize(parse(b">>+[<]").unwrap()), vec![Op::Add { off: 2, val: 1 }, Op::Scan { off: 2, step: -1 }]);
-        assert_eq!(optimize(parse(b"+[>>]").unwrap()).len(), 2);
-        assert!(matches!(optimize(parse(b"+[>>]").unwrap())[1], Op::Loop { .. }));
+        assert_eq!(optimize(parse(b">>[<]", Lang::Bf).unwrap()), vec![Op::Move(2)]);
+        assert_eq!(optimize(parse(b">>+[<]", Lang::Bf).unwrap()), vec![Op::Add { off: 2, val: 1 }, Op::Scan { off: 2, step: -1 }]);
+        assert_eq!(optimize(parse(b"+[>>]", Lang::Bf).unwrap()).len(), 2);
+        assert!(matches!(optimize(parse(b"+[>>]", Lang::Bf).unwrap())[1], Op::Loop { .. }));
     }
 
     #[test]
@@ -418,7 +431,7 @@ mod tests {
         let (mut checked, mut nontrivial) = (0, 0);
         for _ in 0..20000 {
             let src = random_source(&mut rng, b"+++");
-            let raw = parse(&src).unwrap();
+            let raw = parse(&src, Lang::Bf).unwrap();
             let Some(expected) = run(&raw, input, 50_000) else { continue };
             let optimized = optimize(raw);
             let got = run(&optimized, input, 500_000).expect("optimized program must terminate");

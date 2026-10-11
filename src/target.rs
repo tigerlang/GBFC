@@ -21,6 +21,10 @@ pub struct Target {
 pub struct Syscalls {
     pub read: u32,
     pub write: u32,
+    pub open: u32,
+    pub close: u32,
+    pub socket: u32,
+    pub connect: u32,
     pub exit: u32,
     pub eintr: u32,
 }
@@ -54,7 +58,7 @@ impl Target {
 
     pub fn syscalls(&self) -> Syscalls {
         match (self.arch, self.os) {
-            (Arch::X86_64, Os::Linux) => Syscalls { read: 0, write: 1, exit: 60, eintr: 4 },
+            (Arch::X86_64, Os::Linux) => Syscalls { read: 0, write: 1, open: 2, close: 3, socket: 41, connect: 42, exit: 60, eintr: 4 },
         }
     }
 }

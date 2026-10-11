@@ -93,6 +93,14 @@ impl Ev {
                     }
                 }
                 Op::In { .. } => return Err(Stop::Halt(ops[i..].to_vec())),
+                Op::FOpen { .. }
+                | Op::FClose
+                | Op::FIn { .. }
+                | Op::FOut { .. }
+                | Op::NetOpen { .. }
+                | Op::NetClose
+                | Op::NetIn { .. }
+                | Op::NetOut { .. } => return Err(Stop::Halt(ops[i..].to_vec())),
                 Op::Out { off } => {
                     if self.out.len() >= MAX_STATIC_OUT {
                         return Err(self.halt(&ops[i..]));
@@ -210,7 +218,7 @@ pub fn evaluate_with_stats(ops: Vec<Op>, cfg: &Config) -> (Vec<Op>, Stats) {
 mod tests {
     use super::*;
     use crate::opt::{fold_constants, optimize};
-    use crate::parser::parse;
+    use crate::parser::{parse, Lang};
     use crate::testutil::{random_source, run, Lcg};
 
     fn config(fuel: u64) -> Config {
@@ -221,21 +229,21 @@ mod tests {
     fn hello_is_folded_into_one_write() {
         let src = b"++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]>>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.";
         let (ops, stats) =
-            evaluate_with_stats(optimize(parse(src).unwrap()), &Config { fuel: 1_000_000, tape_size: 30000 });
+            evaluate_with_stats(optimize(parse(src, Lang::Bf).unwrap()), &Config { fuel: 1_000_000, tape_size: 30000 });
         assert!(stats.finished);
         assert_eq!(ops, vec![Op::Write(b"Hello World!\n".to_vec())]);
     }
 
     #[test]
     fn stops_at_input_and_keeps_state() {
-        let ops = evaluate(optimize(parse(b"+++>++.,[.,]").unwrap()), &config(1_000_000));
+        let ops = evaluate(optimize(parse(b"+++>++.,[.,]", Lang::Bf).unwrap()), &config(1_000_000));
         assert_eq!(ops[0], Op::Write(vec![2]));
         assert_eq!(run(&ops, b"ab\0", 10_000).unwrap(), vec![2, b'a', b'b']);
     }
 
     #[test]
     fn out_of_tape_access_aborts_the_pass() {
-        let ops = optimize(parse(b"+<+.").unwrap());
+        let ops = optimize(parse(b"+<+.", Lang::Bf).unwrap());
         assert_eq!(evaluate(ops.clone(), &config(1000)), ops);
     }
 
@@ -246,7 +254,7 @@ mod tests {
         let (mut checked, mut changed, mut halted_mid) = (0, 0, 0);
         for _ in 0..30000 {
             let src = random_source(&mut rng, b">>>>>>>>+++");
-            let optimized = optimize(parse(&src).unwrap());
+            let optimized = optimize(parse(&src, Lang::Bf).unwrap());
             let Some(expected) = run(&optimized, input, 50_000) else { continue };
             let fuel = (rng.next() % 3000) as u64 + 1;
             let (evaluated, stats) = evaluate_with_stats(optimized.clone(), &config(fuel));
