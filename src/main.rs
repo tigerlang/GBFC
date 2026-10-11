@@ -1,18 +1,20 @@
 use gbfc::backend::{self, CodegenOptions, EntryKind, EofMode};
 use gbfc::error::{Error, Result};
 use gbfc::target::Target;
+use gbfc::parser::Lang;
 use gbfc::{format, ir, jit, opt, parser, peval};
 use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-GBFC 0.2.0 - General BrainFuck Compiler (direct machine code, AOT + JIT)
+GBFC 0.3.0 - General BrainFuck Compiler (BrainFuck and BrainFuck++, direct machine code, AOT + JIT)
 
 USAGE:
     gbfc [OPTIONS] <input.b>
 
 OPTIONS:
     -o <file>             Output file (default: input name without extension)
+    -bf | -bfpp | -bf++    Source language (default: -bf)
     -j, --jit             JIT-compile and run immediately instead of writing a file
         --emit <kind>     exe (default) | bin (raw machine code) | ir (optimized IR dump)
     -O0 | -O1             Optimization level (default: -O1)
@@ -35,6 +37,7 @@ enum Emit {
 
 struct Cli {
     input: String,
+    lang: Lang,
     output: Option<String>,
     jit: bool,
     emit: Emit,
@@ -54,6 +57,7 @@ fn e<T: ToString>(x: T) -> Error {
 fn parse_args(args: Vec<String>) -> Result<Option<Cli>> {
     let mut cli = Cli {
         input: String::new(),
+        lang: Lang::Bf,
         output: None,
         jit: false,
         emit: Emit::Exe,
@@ -80,9 +84,11 @@ fn parse_args(args: Vec<String>) -> Result<Option<Cli>> {
                 return Ok(None);
             }
             "-V" | "--version" => {
-                println!("gbfc 0.2.0");
+                println!("gbfc 0.3.0");
                 return Ok(None);
             }
+            "-bf" => cli.lang = Lang::Bf,
+            "-bfpp" | "-bf++" => cli.lang = Lang::Bfpp,
             "-o" => cli.output = Some(value("-o")?),
             "-j" | "--jit" => cli.jit = true,
             "-v" | "--verbose" => cli.verbose = true,
@@ -161,11 +167,15 @@ fn run(cli: Cli) -> Result<()> {
         _ => eprintln!("gbfc: warning: '{}' does not have the canonical .b extension", cli.input),
     }
 
-    let raw = parser::parse(&src).map_err(|x| e(format!("{}:{x}", cli.input)))?;
+    let raw = parser::parse(&src, cli.lang).map_err(|x| e(format!("{}:{x}", cli.input)))?;
     let raw_count = ir::count(&raw);
     let ops = if cli.opt >= 1 { opt::optimize(raw) } else { raw };
     if cli.verbose {
-        eprintln!("gbfc: {} source bytes, {raw_count} ops -> {} ops (-O{})", src.len(), ir::count(&ops), cli.opt);
+        let lang = match cli.lang {
+            Lang::Bf => "brainfuck",
+            Lang::Bfpp => "brainfuck++",
+        };
+        eprintln!("gbfc: {lang}, {} source bytes, {raw_count} ops -> {} ops (-O{})", src.len(), ir::count(&ops), cli.opt);
     }
     let ops = if cli.opt >= 1 && cli.fuel > 0 {
         let cfg = peval::Config { fuel: cli.fuel, tape_size: cli.tape as usize };
