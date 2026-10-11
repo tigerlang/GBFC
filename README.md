@@ -51,6 +51,20 @@ The executable exits with 0 on success, 1 when a bounds check fails and 2 on an 
 
 At most one file and one connection are open at a time, reads start at the beginning of a freshly opened file, and file and socket errors set the exit status to 2 like any other I/O error.
 
+## Optimizations
+
+`-O1` runs the passes below, in order; `-O0` emits one instruction per source command and none of them apply.
+
+1. **Compile-time execution** — the program prefix runs inside the compiler on a zeroed tape for up to `--fuel` steps: output becomes a constant `Write`, the tape becomes constant stores, the remaining program is kept as the run-time part.
+2. **Run-length folding** — runs of the same command (`+++`, `>>>`) collapse into a single operation, including runs separated by pointer moves.
+3. **Deferred pointer moves** — moves are not emitted immediately; they are folded into cell offsets, so `>+<` is one add and chains of moves collapse into one.
+4. **Constant propagation with dead code elimination** — the compiler tracks which cells hold known values: a loop over a known-zero cell is removed, a conditionally executed block with a known-true guard is inlined, redundant stores disappear, and cells written inside a loop lose their known state.
+5. **Zero loops to `set`** — `[-]`, `[+]` and loops that only move a value to a cell with a factor of one become a plain store.
+6. **Copy and multiply loops to `muladd`** — `[->+<]`, `[->++>---<<]` and longer ones become one load of the source cell plus a chain of scaled adds, wrapped in a single `If` guard, with the factor derived from the loop step modulo 256.
+7. **Scan loops to a 16-byte SSE2 search** — `[>]` and `[<]` become one op that compares sixteen cells per iteration with `pcmpeqb` and locates the zero byte with `bsf`/`bsr`.
+
+The back end adds a number of smaller instruction-level refinements on top of these (reuse of arithmetic flags across a loop condition, one source load per multiply group, the shortest jump and addressing forms, buffered I/O, bounds checks only where the pointer can have moved); they are not itemized here.
+
 ## Compile-time evaluation
 
 At `-O1` the compiler runs the program on a zeroed tape before generating code, for at most `--fuel` steps. It stops at the first `,` (input is unknown), when the budget is spent, or when the program touches memory outside the tape. Everything computed up to that point is folded into the executable: the output becomes a constant `Write` operation, the tape contents become constant stores, and the rest of the program runs at run time. The executable behaves the same for any stdin.
