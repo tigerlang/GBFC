@@ -97,6 +97,25 @@ At `-O1` the compiler runs the program on a zeroed tape before generating code, 
 
 To add a target such as aarch64-linux: add an `Arch` variant, its syscall numbers in `Target::syscalls`, a `backend/aarch64.rs` implementing `CodeGen`, and the `e_machine` value in `format/elf.rs`. A new OS needs an executable writer in `format/` (Mach-O, PE). The IR and the optimizer stay unchanged.
 
+## Benchmarks
+
+Run `bash bench/run.sh` from the repository root; `bench/fetch.sh` downloads the third-party programs it needs and the rest are generated into a temporary directory. `RUNS`, `FUEL` and `TIMEOUT` are environment variables, and a baseline compiler can be compared with `BASELINE=/path/to/gbfc`.
+
+The table below is the output of that script on the machine this compiler was developed on: best of 3 runs, and the exact numbers will differ on other hardware.
+
+| program | -O0 | -O1 --fuel 0 | -O1 --fuel 4000000000 | compile | output |
+|---|---:|---:|---:|---:|:---:|
+| mandelbrot | 1.29 s | 1.13 s | 2.9 ms | 13.59 s | ✓ |
+| mandel (kostya) | 1.16 s | 1.02 s | 2.4 ms | 13.73 s | ✓ |
+| long | 4.35 s | 227.0 ms | 2.7 ms | 3.79 s | ✓ |
+| hanoi | 5.01 s | 52.0 ms | 2.7 ms | 516.9 ms | ✓ |
+| bench (kostya) | 670.7 ms | 68.4 ms | 3.1 ms | 599.9 ms | ✓ |
+| print 4M bytes | 16.2 ms | 15.4 ms | 11.0 ms | 28.6 ms | ✓ |
+| factor 179424691 | 702.8 ms | 234.4 ms | 234.5 ms | 5.9 ms | ✓ |
+| cat 8 MiB | 33.6 ms | 34.8 ms | 34.9 ms | 5.7 ms | ✓ |
+
+`-O1 --fuel 4000000000` moves the whole computation into the compiler (13.6 s for mandelbrot, ~13 s for both mandelbrot variants) and leaves a run time of a few milliseconds; nothing helps programs that stop at the first `,` or are bound by system calls (`factor`, `cat`).
+
 ## Tests
 
 ```
