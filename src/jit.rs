@@ -78,7 +78,7 @@ pub fn run(target: &Target, image: &CodeImage, tape_size: usize) -> Result<()> {
         return err(format!("cannot JIT-execute {target} code on this host"));
     }
     let code = JitCode::load(image)?;
-    let mut tape = vec![0u8; tape_size];
+    let mut tape = vec![0u8; tape_size + 16];
     match unsafe { code.call(tape.as_mut_ptr(), tape_size) } {
         0 => Ok(()),
         1 => err("runtime error: tape pointer out of bounds"),

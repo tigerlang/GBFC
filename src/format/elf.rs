@@ -80,7 +80,7 @@ pub fn write(arch: Arch, layout: &ExeLayout, image: &CodeImage, tape_size: u64) 
     w.u16(3);
 
     w.phdr(1, 5, 0, layout.image_base, code_end, code_end, 0x1000);
-    w.phdr(1, 6, 0, layout.tape_addr, 0, tape_size, 0x1000);
+    w.phdr(1, 6, 0, layout.tape_addr, 0, tape_size + 16, 0x1000);
     w.phdr(0x6474_e551, 6, 0, 0, 0, 0, 16);
 
     w.0.extend_from_slice(code);

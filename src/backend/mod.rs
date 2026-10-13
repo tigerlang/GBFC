@@ -15,6 +15,7 @@ pub enum EofMode {
 pub struct CodegenOptions {
     pub eof: EofMode,
     pub bounds_check: bool,
+    pub debug_tape: bool,
 }
 
 #[derive(Clone, Copy, Debug)]

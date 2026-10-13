@@ -20,6 +20,7 @@ const SOCK_STREAM: u32 = 1;
 const SOCKADDR_LEN: u32 = 16;
 const FF: u32 = 0;
 const SFD: u32 = 8;
+const STEP: u32 = 16;
 
 const CC_B: u8 = 0x2;
 const CC_AE: u8 = 0x3;
@@ -38,6 +39,7 @@ struct Cfg {
     out: bool,
     inp: bool,
     ff: bool,
+    debug: bool,
 }
 
 impl Cfg {
@@ -60,6 +62,7 @@ impl CodeGen for X86_64 {
             bounds: opts.bounds_check,
             out: uses(ops, &|op| matches!(op, Op::Out { .. } | Op::Write(_))),
             inp: uses(ops, &|op| matches!(op, Op::In { .. })),
+            debug: opts.debug_tape,
             ff: uses(ops, &|op| {
                 matches!(
                     op,
@@ -142,6 +145,8 @@ struct Asm<'a> {
     to_put: Vec<usize>,
     to_write_all: Vec<usize>,
     to_write_fd: Vec<usize>,
+    to_debug: Vec<usize>,
+    to_debug_hex: Vec<usize>,
     to_refill: Vec<usize>,
     to_trap: Vec<usize>,
     to_data: Vec<(usize, usize)>,
@@ -159,6 +164,8 @@ impl<'a> Asm<'a> {
             to_put: Vec::new(),
             to_write_all: Vec::new(),
             to_write_fd: Vec::new(),
+            to_debug: Vec::new(),
+            to_debug_hex: Vec::new(),
             to_refill: Vec::new(),
             to_trap: Vec::new(),
             to_data: Vec::new(),
@@ -250,6 +257,20 @@ impl<'a> Asm<'a> {
         self.mem(dst, disp);
     }
 
+    fn lea_rsp(&mut self, dst: u8, disp: i32) {
+        self.byte(0x48 | (dst >> 3));
+        self.byte(0x8D);
+        if let Ok(d) = i8::try_from(disp) {
+            self.byte(0x40 | (dst << 3) | 4);
+            self.byte(0x24);
+            self.byte(d as u8);
+        } else {
+            self.byte(0x80 | (dst << 3) | 4);
+            self.byte(0x24);
+            self.u32(disp as u32);
+        }
+    }
+
     fn lea_idx(&mut self, dst: u8) {
         self.byte(0x48 | (dst >> 3));
         self.byte(0x8D);
@@ -296,14 +317,14 @@ impl<'a> Asm<'a> {
         }
     }
 
-    fn store_fd_none(&mut self, slot: u32) {
+    fn store_slot(&mut self, slot: u32, val: i32) {
         if slot == 0 {
             self.bytes(&[0x48, 0xC7, 0x04, 0x24]);
         } else {
             self.bytes(&[0x48, 0xC7, 0x44, 0x24]);
             self.byte(slot as u8);
         }
-        self.u32(u32::MAX);
+        self.u32(val as u32);
     }
 
     fn close_fd(&mut self, slot: u32) {
@@ -314,7 +335,7 @@ impl<'a> Asm<'a> {
         self.byte(0xB8);
         self.u32(self.cfg.sys.close);
         self.bytes(&[0x0F, 0x05]);
-        self.store_fd_none(slot);
+        self.store_slot(slot, -1);
         self.patch(done);
     }
 
@@ -382,7 +403,7 @@ impl<'a> Asm<'a> {
         self.set_cell(at, 0x00);
         let done = self.jcc_fwd_unconditional();
         self.patch(failed);
-        self.store_fd_none(FF);
+        self.store_slot(FF, -1);
         self.set_cell(at, 0xFF);
         self.patch(done);
     }
@@ -458,12 +479,12 @@ impl<'a> Asm<'a> {
         self.byte(0xB8);
         self.u32(self.cfg.sys.close);
         self.bytes(&[0x0F, 0x05]);
-        self.store_fd_none(SFD);
+        self.store_slot(SFD, -1);
         self.set_cell(at, 0xFF);
         let end = self.jcc_fwd_unconditional();
         self.patch(broken);
         self.bytes(&[0x48, 0x83, 0xC4, 0x18]);
-        self.store_fd_none(SFD);
+        self.store_slot(SFD, -1);
         self.set_cell(at, 0xFF);
         self.patch(end);
         self.patch(done);
@@ -510,13 +531,18 @@ impl<'a> Asm<'a> {
             self.bytes(&[0x49, 0x89, 0xFF]);
             self.bytes(&[0x48, 0x89, 0xF5]);
         }
-        if self.cfg.ff {
+        if self.cfg.ff || self.cfg.debug {
             self.bytes(&[0x48, 0x81, 0xEC]);
-            self.u32(16);
-            self.bytes(&[0x48, 0xC7, 0x04, 0x24]);
-            self.u32(u32::MAX);
-            self.bytes(&[0x48, 0xC7, 0x44, 0x24, 0x08]);
-            self.u32(u32::MAX);
+            self.u32(24);
+            if self.cfg.ff {
+                self.bytes(&[0x48, 0xC7, 0x04, 0x24]);
+                self.u32(u32::MAX);
+                self.bytes(&[0x48, 0xC7, 0x44, 0x24, 0x08]);
+                self.u32(u32::MAX);
+            }
+            if self.cfg.debug {
+                self.store_slot(STEP, 0);
+            }
         }
     }
 
@@ -525,9 +551,9 @@ impl<'a> Asm<'a> {
         if self.cfg.out {
             self.call_to(|s| &mut s.to_flush);
         }
-        if self.cfg.ff {
+        if self.cfg.ff || self.cfg.debug {
             self.bytes(&[0x48, 0x81, 0xC4]);
-            self.u32(16);
+            self.u32(24);
         }
         if self.cfg.io() {
             self.bytes(&[0x48, 0x81, 0xC4]);
@@ -631,6 +657,45 @@ impl<'a> Asm<'a> {
             self.jmp_back(flush);
             self.byte(0xC3);
         }
+        if self.cfg.debug {
+            let step = self.buf.len();
+            self.bytes(&[0x48, 0x83, 0xEC, 0x40]);
+            self.bytes(&[0x48, 0xFF, 0x44, 0x24, 0x58]);
+            self.bytes(&[0xC7, 0x04, 0x24]);
+            self.u32(0x7065_7473);
+            self.bytes(&[0xC6, 0x44, 0x24, 0x04, 0x20]);
+            self.bytes(&[0x48, 0x8B, 0x74, 0x24, 0x58]);
+            self.lea_rsp(7, 5);
+            self.call_to(|s| &mut s.to_debug_hex);
+            self.bytes(&[0x66, 0xC7, 0x44, 0x24, 0x15, 0x20, 0x70]);
+            self.bytes(&[0xC6, 0x44, 0x24, 0x17, 0x3D]);
+            self.bytes(&[0x48, 0x89, 0xDE]);
+            self.lea_rsp(7, 24);
+            self.call_to(|s| &mut s.to_debug_hex);
+            self.bytes(&[0xC7, 0x44, 0x24, 0x28]);
+            self.u32(0x7061_7420);
+            self.bytes(&[0x66, 0xC7, 0x44, 0x24, 0x2C, 0x65, 0x3D]);
+            self.bytes(&[0x48, 0x8B, 0x33]);
+            self.lea_rsp(7, 46);
+            self.call_to(|s| &mut s.to_debug_hex);
+            self.bytes(&[0xC6, 0x44, 0x24, 0x3E, 0x0A]);
+            let top = self.buf.len();
+            self.byte(0xBF);
+            self.u32(2);
+            self.bytes(&[0x48, 0x89, 0xE6]);
+            self.byte(0xBA);
+            self.u32(63);
+            self.byte(0xB8);
+            self.u32(self.cfg.sys.write);
+            self.bytes(&[0x0F, 0x05]);
+            self.cmp_rax_eintr();
+            self.jcc_back(CC_E, top, true);
+            self.bytes(&[0x48, 0x83, 0xC4, 0x40]);
+            self.byte(0xC3);
+            for at in std::mem::take(&mut self.to_debug) {
+                self.patch_to(at, step);
+            }
+        }
         if self.cfg.ff {
             write_fd = self.buf.len();
             let top = self.buf.len();
@@ -678,6 +743,27 @@ impl<'a> Asm<'a> {
             self.u32(BUF);
             self.bytes(&[0x4D, 0x8D, 0x14, 0x01]);
             self.byte(0xC3);
+        }
+        if self.cfg.debug {
+            let hex = self.buf.len();
+            self.bytes(&[0xB9, 0x10, 0x00, 0x00, 0x00]);
+            let loop_top = self.buf.len();
+            self.bytes(&[0x48, 0xC1, 0xC6, 0x04]);
+            self.bytes(&[0x48, 0x89, 0xF0]);
+            self.bytes(&[0x25, 0x0F, 0x00, 0x00, 0x00]);
+            self.bytes(&[0x04, 0x30]);
+            self.bytes(&[0x3C, 0x39]);
+            let below = self.jcc_fwd(CC_BE, true);
+            self.bytes(&[0x04, 0x27]);
+            self.patch(below);
+            self.bytes(&[0x88, 0x07]);
+            self.bytes(&[0x48, 0xFF, 0xC7]);
+            self.bytes(&[0xFF, 0xC9]);
+            self.jcc_back(CC_NE, loop_top, true);
+            self.byte(0xC3);
+            for at in std::mem::take(&mut self.to_debug_hex) {
+                self.patch_to(at, hex);
+            }
         }
         let datas = std::mem::take(&mut self.datas);
         let mut data_pos = Vec::with_capacity(datas.len());
@@ -787,6 +873,9 @@ impl<'a> Asm<'a> {
             } else {
                 self.op(&ops[i], base, flags_hot(ops, i));
                 i += 1;
+            }
+            if self.cfg.debug {
+                self.call_to(|s| &mut s.to_debug);
             }
         }
     }

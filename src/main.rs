@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 const USAGE: &str = "\
-GBFC 0.3.1 - General BrainFuck Compiler (BrainFuck and BrainFuck++, direct machine code, AOT + JIT)
+GBFC 0.4.0 - General BrainFuck Compiler (BrainFuck and BrainFuck++, direct machine code, AOT + JIT)
 
 USAGE:
     gbfc [OPTIONS] <input.b>
@@ -21,6 +21,7 @@ OPTIONS:
         --tape-size <n>   Tape size in cells (default: 1048576)
         --eof <mode>      Result of ',' at EOF: zero (default) | unchanged | minus1
         --bounds-check    Trap on any access outside the tape (default: unchecked)
+        --debug-tape      Print step number, pointer and cells to stderr after every operation
         --fuel <n>        Compile-time execution budget in steps (default: 100000000, 0 = off)
         --target <name>   Target (default: host). Supported: x86_64-linux
     -v, --verbose         Print statistics to stderr
@@ -45,6 +46,7 @@ struct Cli {
     tape: u64,
     eof: EofMode,
     bounds_check: bool,
+    debug_tape: bool,
     fuel: u64,
     target: Option<String>,
     verbose: bool,
@@ -65,6 +67,7 @@ fn parse_args(args: Vec<String>) -> Result<Option<Cli>> {
         tape: 1 << 20,
         eof: EofMode::Zero,
         bounds_check: false,
+        debug_tape: false,
         fuel: 100_000_000,
         target: None,
         verbose: false,
@@ -84,7 +87,7 @@ fn parse_args(args: Vec<String>) -> Result<Option<Cli>> {
                 return Ok(None);
             }
             "-V" | "--version" => {
-                println!("gbfc 0.3.1");
+                println!("gbfc 0.4.0");
                 return Ok(None);
             }
             "-bf" => cli.lang = Lang::Bf,
@@ -119,6 +122,7 @@ fn parse_args(args: Vec<String>) -> Result<Option<Cli>> {
                 }
             }
             "--bounds-check" => cli.bounds_check = true,
+            "--debug-tape" => cli.debug_tape = true,
             "--fuel" => {
                 let v = value("--fuel")?;
                 cli.fuel = v.parse::<u64>().map_err(|_| e(format!("invalid --fuel '{v}'")))?;
@@ -213,7 +217,7 @@ fn run(cli: Cli) -> Result<()> {
         None => Target::host().unwrap_or(Target::LINUX_X86_64),
     };
     let cg = backend::for_arch(target.arch);
-    let opts = CodegenOptions { eof: cli.eof, bounds_check: cli.bounds_check };
+    let opts = CodegenOptions { eof: cli.eof, bounds_check: cli.bounds_check, debug_tape: cli.debug_tape };
     let sys = target.syscalls();
 
     if cli.jit || cli.emit == Emit::Bin {
