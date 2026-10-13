@@ -26,6 +26,7 @@ gbfc --emit bin prog.b         # raw machine code (objdump -D -b binary -mi386:x
 | `--tape-size N` | tape size in cells (default 1048576) |
 | `--eof zero\|unchanged\|minus1` | result of `,` at EOF (default `zero`) |
 | `--bounds-check` | trap on any access outside the tape |
+| `--debug-tape` | print step number, pointer and cells to stderr after every operation |
 | `--fuel N` | compile-time evaluation budget in steps (default 100000000, `0` disables) |
 | `--target x86_64-linux` | target (default: host) |
 | `-v` | print statistics to stderr |
@@ -35,6 +36,8 @@ gbfc --emit bin prog.b         # raw machine code (objdump -D -b binary -mi386:x
 Cells are 8-bit and wrap modulo 256. Every byte other than `+-<>[].,` is a comment. Unbalanced brackets are reported as `line:column`. Tape bounds are not checked unless `--bounds-check` is given; leaving the tape then ends in SIGSEGV.
 
 The executable exits with 0 on success, 1 when a bounds check fails and 2 on an I/O error (a failed write, or a read error other than EOF), and prints a message to stderr in both failure cases. Interrupted system calls are retried and partial writes are completed.
+
+`--debug-tape` adds one line to stderr after every executed operation, in the form `step 0000000000000001 p=0000000000000000 tape=0000000000000003` (step number, data pointer and the eight cells at the pointer, all hexadecimal). It is a debugging aid: the program then runs orders of magnitude slower.
 
 ## Languages
 
@@ -93,7 +96,7 @@ At `-O1` the compiler runs the program on a zeroed tape before generating code, 
 | `backend/mod.rs` | `CodeGen` trait, `CodegenOptions`, `EntryKind::{Function, Process}` |
 | `backend/x86_64.rs` | hand-encoded x86-64; `rbx` holds the data pointer, I/O goes through raw syscalls; loop conditions reuse arithmetic flags, multiply groups share one source load, `scan` searches 16 bytes at a time with SSE2, file and socket commands keep their descriptor in the stack frame |
 | `format/` | executable writers per OS (currently `elf.rs`) |
-| `jit.rs` | loads and calls `extern "C" fn(*mut u8, usize) -> u32` |
+| `jit.rs` | loads and calls `extern "C" fn(*mut u8, usize) -> u32`; the tape is allocated with sixteen bytes of slack past its end |
 
 To add a target such as aarch64-linux: add an `Arch` variant, its syscall numbers in `Target::syscalls`, a `backend/aarch64.rs` implementing `CodeGen`, and the `e_machine` value in `format/elf.rs`. A new OS needs an executable writer in `format/` (Mach-O, PE). The IR and the optimizer stay unchanged.
 
