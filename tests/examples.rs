@@ -304,6 +304,27 @@ fn brainfuck_pp_socket() {
 }
 
 #[test]
+fn debug_tape_prints_every_step() {
+    let src = tmp("debug-tape.b");
+    let exe = tmp("debug-tape");
+    std::fs::write(&src, "+++>+.").unwrap();
+    for mode in [&["--fuel", "0"][..], &["--fuel", "0", "--bounds-check"][..]] {
+        let out = gbfc().args(mode).arg("--debug-tape").arg(&src).arg("-o").arg(&exe).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let run = Command::new(&exe).output().unwrap();
+        let stderr = String::from_utf8_lossy(&run.stderr);
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert_eq!(lines.len(), 4, "{mode:?} {stderr}");
+        assert!(lines[0].starts_with("step 0000000000000001 p="), "{mode:?} {}", lines[0]);
+        assert!(lines[0].ends_with("tape=0000000000000003"), "{mode:?} {}", lines[0]);
+        assert!(lines[3].ends_with("tape=0000000000000001"), "{mode:?} {}", lines[3]);
+        assert_eq!(run.stdout, vec![1u8], "{mode:?}");
+    }
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&exe);
+}
+
+#[test]
 fn bounds_check_traps() {
     let cases: &[(&str, &[&str], &[u8])] = &[
         ("<+", &[], b""),
